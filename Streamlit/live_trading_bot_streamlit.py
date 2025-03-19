@@ -7,93 +7,75 @@ from pytz import timezone
 import plotly.graph_objects as go
 
 # -----------------------
-# 📊 Enhanced Strategy Class
+# 📊 Strategy Class
 # -----------------------
-class EnhancedStrategy(bt.Strategy):
+class FixedExitStrategy(bt.Strategy):
     params = (
-        ('short_ema', 10),
-        ('long_ema', 50),
-        ('rsi_period', 14),
-        ('atr_period', 14),
-        ('atr_multiplier', 2.0),
-        ('max_hold_minutes', 60),  
-        ('trailing_percent', 0.01),  # 1% trailing stop-loss
+        ('stop_loss_percent', 0.001),  # 0.1%
+        ('take_profit_percent', 0.002),  # 0.2%
+        ('max_hold_minutes', 60),  # Max hold time in minutes
     )
 
     def __init__(self):
         self.order = None
+        self.entry_price = None
+        self.entry_time = None
         self.trades = []
         self.buy_signals = []
         self.sell_signals = []
-
-        # Indicators
-        self.ema_short = bt.indicators.ExponentialMovingAverage(self.data.close, period=self.params.short_ema)
-        self.ema_long = bt.indicators.ExponentialMovingAverage(self.data.close, period=self.params.long_ema)
-        self.rsi = bt.indicators.RSI(self.data.close, period=self.params.rsi_period)
-        self.atr = bt.indicators.ATR(self.data, period=self.params.atr_period)
-
-        # Trailing Stop-Loss
-        self.trailing_stop = None
 
     def log(self, txt):
         """Log messages in IST timezone."""
         dt_utc = self.datas[0].datetime.datetime(0).replace(tzinfo=timezone('UTC'))
         dt_ist = dt_utc.astimezone(timezone('Asia/Kolkata'))
         st.session_state.logs.append(f'{dt_ist}: {txt}')
-
+    
     def next(self):
+        """Logic for Buy/Sell Execution"""
         ist = timezone('Asia/Kolkata')
 
         if not self.position:
-            # Buy condition: EMA crossover + RSI confirmation
-            if self.ema_short > self.ema_long and self.rsi < 30:
-                self.order = self.buy()
+            # Place Buy Order
+            self.order = self.buy()
+            self.entry_price = self.datas[0].close[0]
 
-                # Store Entry Price and Time
-                self.entry_price = self.data.close[0]
-                dt_utc = self.datas[0].datetime.datetime(0).replace(tzinfo=timezone('UTC'))
-                self.entry_time = dt_utc.astimezone(ist)
+            # Convert to IST
+            dt_utc = self.datas[0].datetime.datetime(0).replace(tzinfo=timezone('UTC'))
+            self.entry_time = dt_utc.astimezone(ist)
 
-                # Set dynamic SL/TP based on ATR
-                self.stop_loss = self.entry_price - self.atr[0] * self.params.atr_multiplier
-                self.take_profit = self.entry_price + self.atr[0] * self.params.atr_multiplier
-                self.trailing_stop = self.entry_price * (1 - self.params.trailing_percent)
-
-                self.buy_signals.append((self.entry_time, self.entry_price))
-                self.log(f'BUY at {self.entry_price} (SL: {self.stop_loss}, TP: {self.take_profit})')
+            self.buy_signals.append((self.entry_time, self.entry_price))
+            self.log(f'BUY at {self.entry_price}')
 
         else:
-            current_price = self.data.close[0]
+            current_price = self.datas[0].close[0]
+
+            # Ensure both datetimes are timezone-aware
             dt_utc = self.datas[0].datetime.datetime(0).replace(tzinfo=timezone('UTC'))
             current_time_ist = dt_utc.astimezone(ist)
 
-            # Trailing Stop-Loss Adjustment
-            if current_price > self.entry_price and current_price > self.trailing_stop:
-                self.trailing_stop = max(self.trailing_stop, current_price * (1 - self.params.trailing_percent))
-
-            # Exit conditions
+            # Calculate hold time
+            hold_time = (current_time_ist - self.entry_time).total_seconds() / 60
             exit_reason = None
 
-            # Stop-Loss
-            if current_price <= self.stop_loss:
+            # Stop Loss Exit
+            if current_price <= self.entry_price * (1 - self.params.stop_loss_percent):
+                self.order = self.sell()
                 exit_reason = "Stop Loss"
 
-            # Take-Profit
-            elif current_price >= self.take_profit:
+            # Take Profit Exit
+            elif current_price >= self.entry_price * (1 + self.params.take_profit_percent):
+                self.order = self.sell()
                 exit_reason = "Take Profit"
 
-            # Trailing Stop-Loss Hit
-            elif current_price <= self.trailing_stop:
-                exit_reason = "Trailing Stop"
-
             # Max Hold Time Exit
-            hold_time = (current_time_ist - self.entry_time).total_seconds() / 60
-            if hold_time >= self.params.max_hold_minutes:
+            elif hold_time >= self.params.max_hold_minutes:
+                self.order = self.sell()
                 exit_reason = "Time Exit"
 
+            # Record the trade
             if exit_reason:
                 self.sell_signals.append((current_time_ist, current_price))
-                self.order = self.sell()
+                self.log(f'SELL at {current_price} ({exit_reason})')
 
                 self.trades.append({
                     'buy_time': self.entry_time,
@@ -103,9 +85,8 @@ class EnhancedStrategy(bt.Strategy):
                     'reason': exit_reason
                 })
 
-                self.log(f'SELL at {current_price} ({exit_reason})')
-
     def notify_order(self, order):
+        """Notify on Order Execution"""
         if order.status in [order.Completed]:
             if order.isbuy():
                 self.log(f'BUY EXECUTED at {order.executed.price}')
@@ -113,30 +94,32 @@ class EnhancedStrategy(bt.Strategy):
                 self.log(f'SELL EXECUTED at {order.executed.price}, Profit: {order.executed.pnl}')
             self.order = None
 
-
 # -----------------------
 # 📈 Fetch Data from Yahoo Finance
 # -----------------------
 def get_data(symbol, start_date, end_date, interval='1m'):
+    """Fetch stock data using yfinance with IST timezone."""
     stock = yf.Ticker(symbol)
     df = stock.history(start=start_date, end=end_date, interval=interval)
-
+    
     if df.empty:
         st.warning(f"No data fetched for {symbol} from {start_date} to {end_date}")
         return None, None
 
+    # Convert to IST timezone
     ist = timezone('Asia/Kolkata')
     df.index = df.index.tz_convert(ist) if df.index.tz else df.index.tz_localize('UTC').tz_convert(ist)
     
     return bt.feeds.PandasData(dataname=df), df
 
-
 # -----------------------
 # 📊 Plot Candlestick Chart
 # -----------------------
 def plot_candlestick_chart(df, buy_signals, sell_signals):
+    """Display Candlestick Chart with Buy and Sell signals."""
     fig = go.Figure()
 
+    # Candlestick chart
     fig.add_trace(go.Candlestick(
         x=df.index,
         open=df['Open'],
@@ -146,6 +129,7 @@ def plot_candlestick_chart(df, buy_signals, sell_signals):
         name="Candlesticks"
     ))
 
+    # Plot Buy signals
     if buy_signals:
         buy_times, buy_prices = zip(*buy_signals)
         fig.add_trace(go.Scatter(
@@ -156,6 +140,7 @@ def plot_candlestick_chart(df, buy_signals, sell_signals):
             name='Buy Signals'
         ))
 
+    # Plot Sell signals
     if sell_signals:
         sell_times, sell_prices = zip(*sell_signals)
         fig.add_trace(go.Scatter(
@@ -167,7 +152,7 @@ def plot_candlestick_chart(df, buy_signals, sell_signals):
         ))
 
     fig.update_layout(
-        title="Enhanced Candlestick Chart with Buy/Sell Signals",
+        title="Candlestick Chart with Buy/Sell Signals",
         xaxis_title="Time",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
@@ -176,29 +161,61 @@ def plot_candlestick_chart(df, buy_signals, sell_signals):
 
     st.plotly_chart(fig)
 
-
 # -----------------------
 # 📊 Streamlit UI
 # -----------------------
-st.title("📊 Advanced Trading Bot with Candlestick Chart (IST)")
+st.title("📊 Backtrader Backtesting Bot with Candlestick Chart (IST)")
 
+# Sidebar for parameters
 symbol = st.sidebar.text_input("Stock Symbol", "RELIANCE.NS")
+stop_loss = st.sidebar.number_input("Stop Loss (%)", min_value=0.1, value=0.1)
+take_profit = st.sidebar.number_input("Take Profit (%)", min_value=0.1, value=0.2)
+interval = st.sidebar.selectbox("Interval", ['1m', '15m'])
 start_date = st.sidebar.date_input("Start Date", datetime(2025, 3, 19))
 end_date = st.sidebar.date_input("End Date", datetime(2025, 3, 20))
 
+# Logs
 if "logs" not in st.session_state:
     st.session_state.logs = []
 
+# -----------------------
+# 🚀 Run Backtest
+# -----------------------
 if st.button("▶️ Run Backtest"):
     cerebro = bt.Cerebro()
-    cerebro.addstrategy(EnhancedStrategy)
+    strat = FixedExitStrategy
 
-    data_feed, raw_data = get_data(symbol, start_date, end_date, '1m')
+    cerebro.addstrategy(strat, 
+                        stop_loss_percent=stop_loss / 100, 
+                        take_profit_percent=take_profit / 100, 
+                        max_hold_minutes=5)
+
+    # Fetch data
+    data_feed, raw_data = get_data(symbol, start_date, end_date, interval)
 
     if raw_data is not None:
         cerebro.adddata(data_feed)
         cerebro.broker.setcash(100000.0)
         results = cerebro.run()
 
+        # Display Summary
         strat = results[0]
+        total_trades = len(strat.trades)
+        total_profit = sum(trade['sell_price'] - trade['buy_price'] for trade in strat.trades)
+
+        st.subheader("📊 Backtest Results")
+        st.write(f"**Total Trades:** {total_trades}")
+        st.write(f"**Total Profit:** ₹{total_profit:.2f}")
+
+        # Display Trades Summary
+        if strat.trades:
+            trades_df = pd.DataFrame(strat.trades)
+            trades_df['Profit'] = trades_df['sell_price'] - trades_df['buy_price']
+            st.dataframe(trades_df)
+
+        # Plot Candlestick Chart
         plot_candlestick_chart(raw_data, strat.buy_signals, strat.sell_signals)
+
+# Display logs
+st.subheader("📝 Logs")
+st.text_area("Logs", value="\n".join(st.session_state.logs), height=300)
