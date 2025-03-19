@@ -13,7 +13,7 @@ class FixedExitStrategy(bt.Strategy):
     params = (
         ('stop_loss_percent', 0.001),  # 0.1%
         ('take_profit_percent', 0.002),  # 0.2%
-        ('max_hold_minutes', 5),  # Max hold time in minutes
+        ('max_hold_minutes', 60),  # Max hold time in minutes
     )
 
     def __init__(self):

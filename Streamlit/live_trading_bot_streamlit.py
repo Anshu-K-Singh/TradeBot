@@ -188,7 +188,7 @@ if st.button("▶️ Run Backtest"):
     cerebro.addstrategy(strat, 
                         stop_loss_percent=stop_loss / 100, 
                         take_profit_percent=take_profit / 100, 
-                        max_hold_minutes=5)
+                        max_hold_minutes=60)
 
     # Fetch data
     data_feed, raw_data = get_data(symbol, start_date, end_date, interval)
