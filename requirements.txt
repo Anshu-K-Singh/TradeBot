@@ -3,4 +3,6 @@ backtrader
 yfinance
 pandas
 pytz
-plotly
+plotly 
+matplotlib 
+mplfinance
